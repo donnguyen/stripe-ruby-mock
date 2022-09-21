@@ -4,6 +4,7 @@ module StripeMock
       module Session
         def Session.included(klass)
           klass.add_handler 'post /v1/checkout/sessions', :new_session
+          klass.add_handler 'get /v1/checkout/sessions', :list_checkout_sessions
           klass.add_handler 'get /v1/checkout/sessions/([^/]*)', :get_checkout_session
           klass.add_handler 'get /v1/checkout/sessions/([^/]*)/line_items', :list_line_items
         end
@@ -11,7 +12,7 @@ module StripeMock
         def new_session(route, method_url, params, headers)
           id = params[:id] || new_id('cs')
 
-          [:cancel_url, :payment_method_types, :success_url].each do |p|
+          [:cancel_url, :success_url].each do |p|
             require_param(p) if params[p].nil? || params[p].empty?
           end
 
@@ -45,7 +46,18 @@ module StripeMock
           amount = nil
           currency = nil
           if line_items
-            amount = line_items.map { |line_item| prices[line_item[:price]][:unit_amount] * line_item[:quantity] }.sum
+            amount = 0
+
+            line_items.each do |line_item| 
+              price = prices[line_item[:price]]
+
+              if price.nil?
+                raise StripeMock::StripeMockError.new("Price not found for ID: #{line_item[:price]}")
+              end
+
+              amount += (price[:unit_amount] * line_item[:quantity])
+            end
+
             currency = prices[line_items.first[:price]][:currency]
           end
 
@@ -55,7 +67,7 @@ module StripeMock
           case params[:mode]
           when nil, "payment"
             params[:customer] ||= new_customer(nil, nil, {email: params[:customer_email]}, nil)[:id]
-            require_params(:line_items) if params[:line_items].nil? || params[:line_items].empty?
+            require_param(:line_items) if params[:line_items].nil? || params[:line_items].empty?
             payment_intent = new_payment_intent(nil, nil, {
               amount: amount,
               currency: currency,
@@ -76,7 +88,7 @@ module StripeMock
             payment_status = "no_payment_required"
           when "subscription"
             params[:customer] ||= new_customer(nil, nil, {email: params[:customer_email]}, nil)[:id]
-            require_params(:line_items) if params[:line_items].nil? || params[:line_items].empty?
+            require_param(:line_items) if params[:line_items].nil? || params[:line_items].empty?
             checkout_session_line_items[id] = line_items
           else
             throw Stripe::InvalidRequestError.new("Invalid mode: must be one of payment, setup, or subscription", :mode, http_status: 400)
@@ -93,15 +105,15 @@ module StripeMock
               status: nil
             },
             billing_address_collection: nil,
-            cancel_url: "http://example.com/checkout/cancel?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url: params[:cancel_url],
             client_reference_id: nil,
             currency: currency,
             customer: params[:customer],
             customer_details: nil,
-            customer_email: nil,
+            customer_email: params[:customer_email],
             livemode: false,
             locale: nil,
-            metadata: {},
+            metadata: params[:metadata],
             mode: params[:mode],
             payment_intent: payment_intent,
             payment_method_options: params[:payment_method_options],
@@ -112,10 +124,14 @@ module StripeMock
             shipping_address_collection: nil,
             submit_type: nil,
             subscription: nil,
-            success_url: "http://example.com/checkout/success?session_id={CHECKOUT_SESSION_ID}",
+            success_url: params[:success_url],
             total_details: nil,
-            url: "https://checkout.stripe.com/pay/#{id}"
+            url: URI.join(StripeMock.checkout_base, id).to_s
           }
+        end
+
+        def list_checkout_sessions(route, method_url, params, headers)
+          Data.mock_list_object(checkout_sessions.values)
         end
 
         def get_checkout_session(route, method_url, params, headers)
@@ -138,6 +154,11 @@ module StripeMock
             line_items = assert_existence :checkout_session_line_items, $1, checkout_session_line_items[$1]
             line_items.map do |line_item|
               price = prices[line_item[:price]].clone
+
+              if price.nil?
+                raise StripeMock::StripeMockError.new("Price not found for ID: #{line_item[:price]}")
+              end
+
               {
                 id: line_item[:id],
                 object: "item",
